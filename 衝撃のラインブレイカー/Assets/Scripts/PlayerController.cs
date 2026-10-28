@@ -26,9 +26,13 @@ public class PlayerController : MonoBehaviour
     public float grappleBoostSpeed = 45f; // 飛び出すときの猛烈な初速
     public float searchRadius = 45f;        // 前方サーチの範囲
     public float maxGrappleTime = 0.7f;   // ワイヤーが自動で切れるまでの時間（秒）
+    public float grappleDelay = 0.5f;     // ★ワイヤーがプレイヤーからターゲットへ伸びるまでの時間（秒）
+
     private bool isGrappling = false;
+    private bool isGrappleWaiting = false; // ワイヤーが伸びている最中（ディレイ中）
     private Vector3 grappleVelocity;      // ワイヤー専用の速度
     private float grappleTimer = 0f;      // ワイヤー発動からの経過時間
+    private float grappleDelayTimer = 0f; // ディレイ計測用タイマー
 
     private Vector3 leftGrappleTarget;
     private Vector3 rightGrappleTarget;
@@ -117,7 +121,7 @@ public class PlayerController : MonoBehaviour
         isGrounded = controller.isGrounded;
 
         // --- 【ワイヤーアクション：視点中心 ±90度の範囲で自動サーチ＆発動】 ---
-        if (Input.GetMouseButtonDown(1)) // 右クリック
+        if (Input.GetMouseButtonDown(1) && !isGrappling && !isGrappleWaiting) // 右クリック
         {
             Collider[] hitColliders = Physics.OverlapSphere(transform.position, searchRadius);
 
@@ -180,29 +184,92 @@ public class PlayerController : MonoBehaviour
 
             if (hasLeftTarget || hasRightTarget)
             {
+                isGrappleWaiting = true;
+                grappleDelayTimer = 0f;
+            }
+        }
+
+        // --- 【ワイヤー発射後、0.5秒かけてターゲットに向かって伸びていく最中】 ---
+        if (isGrappleWaiting)
+        {
+            grappleDelayTimer += Time.deltaTime;
+            float progress = Mathf.Clamp01(grappleDelayTimer / grappleDelay); // 0.0 ～ 1.0 の進捗率
+
+            Vector3 leftHip = transform.position + Vector3.up * 1.0f - transform.right * 0.4f;
+            Vector3 rightHip = transform.position + Vector3.up * 1.0f + transform.right * 0.4f;
+
+            // ★ワイヤーの先端がプレイヤーからターゲットへ向かって徐々に伸びていく演出
+            Vector3 currentLeftPoint = Vector3.Lerp(leftHip, leftGrappleTarget, progress);
+            Vector3 currentRightPoint = Vector3.Lerp(rightHip, rightGrappleTarget, progress);
+
+            if (hasLeftTarget && leftLineRenderer != null)
+            {
+                leftLineRenderer.positionCount = 2;
+                leftLineRenderer.SetPosition(0, leftHip);
+                leftLineRenderer.SetPosition(1, currentLeftPoint);
+            }
+            else if (leftLineRenderer != null) { leftLineRenderer.positionCount = 0; }
+
+            if (hasRightTarget && rightLineRenderer != null)
+            {
+                rightLineRenderer.positionCount = 2;
+                rightLineRenderer.SetPosition(0, rightHip);
+                rightLineRenderer.SetPosition(1, currentRightPoint);
+            }
+            else if (rightLineRenderer != null) { rightLineRenderer.positionCount = 0; }
+
+            // 途中で右クリックを離したらキャンセル
+            if (Input.GetMouseButtonUp(1))
+            {
+                isGrappleWaiting = false;
+                if (leftLineRenderer != null) leftLineRenderer.positionCount = 0;
+                if (rightLineRenderer != null) rightLineRenderer.positionCount = 0;
+            }
+
+            // 0.5秒経過してワイヤーがターゲットに到達したら、ガツンとブースト発動！
+            if (grappleDelayTimer >= grappleDelay)
+            {
+                isGrappleWaiting = false;
                 isGrappling = true;
                 grappleTimer = 0f;
 
-                if (isGrounded)
-                {
-                    controller.Move(Vector3.up * 0.3f);
-                }
+                Vector3 anchorPoint = (leftGrappleTarget + rightGrappleTarget) * 0.5f;
+                float heightDiff = anchorPoint.y - transform.position.y;
 
-                // ★修正：ワイヤーがどこに刺さっていようと、初速が進む方向は「カメラ（視点）が向いている方向」！
-                Vector3 boostDir = playerCamera != null ? playerCamera.forward : transform.forward;
-                boostDir.y = 0.3f; // 少し上向きの浮遊感
+                Vector3 camHeading = playerCamera != null ? playerCamera.forward : transform.forward;
+                camHeading.y = 0;
+                camHeading.Normalize();
+
+                Vector3 boostDir = camHeading;
+
+                if (heightDiff > 0)
+                {
+                    boostDir.y = Mathf.Clamp(heightDiff * 0.05f, 0.1f, 0.3f);
+                }
+                else
+                {
+                    boostDir.y = Mathf.Clamp(heightDiff * 0.05f, -0.2f, 0.05f);
+                }
                 boostDir.Normalize();
 
                 grappleVelocity = boostDir * grappleBoostSpeed;
             }
         }
+        else
+        {
+            if (!isGrappling)
+            {
+                if (leftLineRenderer != null) leftLineRenderer.positionCount = 0;
+                if (rightLineRenderer != null) rightLineRenderer.positionCount = 0;
+            }
+        }
 
-        // --- 【ワイヤー中の挙動】 ---
+        // --- 【ワイヤー中の挙動（ブースト中）】 ---
         if (isGrappling)
         {
             grappleTimer += Time.deltaTime;
 
-            bool shouldEnd = Input.GetMouseButtonUp(1) || (grappleTimer >= maxGrappleTime);
+            bool shouldEnd = Input.GetMouseButtonUp(1) || (grappleTimer >= maxGrappleTime) || (isGrounded && grappleTimer > 0.1f);
 
             if (shouldEnd)
             {
@@ -211,7 +278,6 @@ public class PlayerController : MonoBehaviour
             }
             else
             {
-                // 腰の左右からワイヤーを綺麗に伸ばす（あくまで見た目の飾り・演出）
                 Vector3 leftHip = transform.position + Vector3.up * 1.0f - transform.right * 0.4f;
                 Vector3 rightHip = transform.position + Vector3.up * 1.0f + transform.right * 0.4f;
 
@@ -231,20 +297,17 @@ public class PlayerController : MonoBehaviour
                 }
                 else if (rightLineRenderer != null) { rightLineRenderer.positionCount = 0; }
 
-                // ★修正：ワイヤー中も進む方向は常にカメラの視点方向！
-                Vector3 camForward = playerCamera != null ? playerCamera.forward : transform.forward;
-                camForward.y = 0;
-                camForward.Normalize();
+                Vector3 camHeading = playerCamera != null ? playerCamera.forward : transform.forward;
+                camHeading.y = 0;
+                camHeading.Normalize();
 
                 grappleVelocity.y += (gravity * 0.15f) * Time.deltaTime;
-                grappleVelocity = (camForward * grappleBoostSpeed) + (Vector3.up * grappleVelocity.y);
 
                 controller.Move(grappleVelocity * Time.deltaTime);
 
-                // キャラクターの向きもカメラの視点方向に合わせる
-                if (camForward.sqrMagnitude > 0.01f)
+                if (camHeading.sqrMagnitude > 0.01f)
                 {
-                    Quaternion targetRotation = Quaternion.LookRotation(camForward);
+                    Quaternion targetRotation = Quaternion.LookRotation(camHeading);
                     transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, 0.2f);
                 }
 
@@ -252,11 +315,7 @@ public class PlayerController : MonoBehaviour
             }
         }
 
-        // ワイヤー中でないときは線を消す
-        if (leftLineRenderer != null) leftLineRenderer.positionCount = 0;
-        if (rightLineRenderer != null) rightLineRenderer.positionCount = 0;
-
-        // --- 【通常移動 / ワイヤー終了後の空中制御（エアコントロール）】 ---
+        // --- 【通常移動 / ワイヤー終了後の空中制御】 ---
         if (isGrounded)
         {
             velocity.y = -2f;
